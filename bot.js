@@ -1,6 +1,10 @@
 import * as Misskey from 'misskey-js';
 import Database from 'better-sqlite3';
-import 'dotenv/config'; // .envを使う場合
+// import { WebSocket } from 'ws';
+import pkg from 'ws';
+const WebSocket = pkg.WebSocket || pkg.default || pkg;
+
+global.WebSocket = WebSocket;
 
 const MISSKEY_URL = process.env.MISSKEY_URL;
 const MISSKEY_TOKEN = process.env.MISSKEY_TOKEN;
@@ -11,7 +15,10 @@ const cli = new Misskey.api.APIClient({
   credential: MISSKEY_TOKEN,
 });
 
-const stream = new Misskey.Stream(MISSKEY_URL, { token: MISSKEY_TOKEN });
+const stream = new Misskey.Stream(MISSKEY_URL, {
+  token: MISSKEY_TOKEN,
+  // WebSocket: ws.WebSocket || ws
+});
 
 // Bot自身のユーザーID取得
 let botUserId;
@@ -21,7 +28,7 @@ cli.request('i').then((res) => {
 });
 
 // SQLiteデータベース初期化
-const db = new Database('database.db');
+const db = new Database('./data/database.db');
 db.exec(`
   CREATE TABLE IF NOT EXISTS logbo_records (
     user_id TEXT PRIMARY KEY,
@@ -38,10 +45,10 @@ function getLogboDate() {
   // 日本時間に変換（UTC+9）
   const jstOffset = 9 * 60 * 60 * 1000;
   const jstTime = new Date(now.getTime() + jstOffset);
-  
+
   // 5時間引いて日付判定（朝5時切り替え）
   jstTime.setHours(jstTime.getHours() - 5);
-  
+
   // YYYY-MM-DD形式で返す
   return jstTime.toISOString().split('T')[0];
 }
@@ -107,23 +114,23 @@ function recordLogbo(userId, username) {
 // ランキング取得
 function getRanking() {
   const ranking = db.prepare(`
-    SELECT username, consecutive_days, total_days 
-    FROM logbo_records 
-    ORDER BY consecutive_days DESC, total_days DESC 
+    SELECT username, consecutive_days, total_days
+    FROM logbo_records
+    ORDER BY consecutive_days DESC, total_days DESC
     LIMIT 10
   `).all();
-  
+
   if (ranking.length === 0) {
     return '現在、ログインボーナスのデータはございません。';
   }
-  
+
   let rankingText = '📊 **連続ログインボーナス ランキング TOP 10**\n\n';
   ranking.forEach((record, index) => {
     const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}. `;
     rankingText += `${medal} @${record.username}\n`;
     rankingText += `   連続: ${record.consecutive_days}日 / 合計: ${record.total_days}日\n\n`;
   });
-  
+
   return rankingText;
 }
 
@@ -164,7 +171,7 @@ timelineChannel.on('note', async (note) => {
   if (text.includes('ログボ')) {
     // フォロワーチェック
     const isFollowerUser = await isFollower(userId);
-    
+
     if (!isFollowerUser) {
       // 未フォローの場合は誘導（頻繁なスパムにならないようメンション時のみ反応するなど調整可だが、一旦反応させる）
       await cli.request('notes/create', {
@@ -192,7 +199,7 @@ timelineChannel.on('note', async (note) => {
       const message = result.consecutive === 1 && result.total === 1
         ? `@${username} 🎉 初回ログインボーナスです！明日もまたお越しください。`
         : `@${username} 🎁 ログインボーナス！\n連続ログイン: ${result.consecutive}日目\n合計: ${result.total}日`;
-      
+
       await cli.request('notes/create', {
         text: message,
         replyId: note.id,

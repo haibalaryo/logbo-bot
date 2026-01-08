@@ -12,6 +12,7 @@
   "license": "CC0-1.0",
   "dependencies": {
     "misskey-js": "^2024.10.1",
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^11.0.0",
+    "ws": "^8.18.0"
   }
 }
