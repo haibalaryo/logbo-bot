@@ -1,0 +1,315 @@
+import * as Misskey from 'misskey-js';
+import Database from 'better-sqlite3';
+import fs from 'fs';
+import pkg from 'ws';
+
+// WebSocketのポリフィル（Node.js環境用）
+const WebSocket = pkg.WebSocket || pkg.default || pkg;
+global.WebSocket = WebSocket;
+
+const MISSKEY_URL = process. env.MISSKEY_URL;
+const MISSKEY_TOKEN = process.env.MISSKEY_TOKEN;
+
+// 1. 環境変数チェック（必須！）
+if (!MISSKEY_URL || !MISSKEY_TOKEN) {
+  console.error('Error: MISSKEY_URL and MISSKEY_TOKEN must be set in . env file');
+  process.exit(1);
+}
+
+// 2. Botがいるインスタンスのホスト名を取得
+const BOT_HOST = new URL(MISSKEY_URL).hostname;
+console.log(`Bot instance host: ${BOT_HOST}`);
+
+// 3. dataディレクトリがなければ作成（再帰的に作成）
+if (!fs.existsSync('./data')) {
+  try {
+    fs.mkdirSync('./data', { recursive: true });
+    console.log('Created ./data directory');
+  } catch (err) {
+    console.error('Failed to create data directory:', err);
+    process.exit(1);
+  }
+}
+
+// Misskey接続
+const cli = new Misskey.api.APIClient({
+  origin: MISSKEY_URL,
+  credential: MISSKEY_TOKEN,
+});
+
+const stream = new Misskey.Stream(MISSKEY_URL, {
+  token: MISSKEY_TOKEN,
+});
+
+// Bot自身のユーザーID取得
+let botUserId;
+cli.request('i').then((res) => {
+  botUserId = res.id;
+  console.log(`Bot user ID: ${botUserId}`);
+}).catch(err => {
+  console.error('Login failed.  Check your Token. ', err);
+  process.exit(1);
+});
+
+// SQLiteデータベース初期化
+const db = new Database('./data/database.db');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS logbo_records (
+    user_id TEXT PRIMARY KEY,
+    username TEXT,
+    total_days INTEGER DEFAULT 0,
+    consecutive_days INTEGER DEFAULT 0,
+    last_logbo_date TEXT
+  )
+`);
+
+// JST朝5時基準の日付を取得
+function getLogboDate() {
+  const now = new Date();
+  const jstOffset = 9 * 60 * 60 * 1000;
+  const jstTime = new Date(now.getTime() + jstOffset);
+  jstTime.setHours(jstTime.getHours() - 5);
+  return jstTime.toISOString().split('T')[0];
+}
+
+// フォロワーかどうかチェック
+async function isFollower(userId) {
+  try {
+    const relation = await cli.request('users/relation', { userId: [userId] });
+    return relation[0]?.isFollowing || false;
+  } catch (error) {
+    console.error('Failed to check follower status:', error);
+    return false;
+  }
+}
+
+// フォロー機能
+async function followUser(userId) {
+  try {
+    await cli.request('following/create', { userId });
+    console.log(`Followed user:  ${userId}`);
+  } catch (error) {
+    console.error('Failed to follow user:', error);
+  }
+}
+
+// ログボ記録処理
+function recordLogbo(userId, fullAcct) {
+  const today = getLogboDate();
+
+  const record = db.prepare('SELECT * FROM logbo_records WHERE user_id = ?').get(userId);
+
+  if (!record) {
+    db.prepare('INSERT INTO logbo_records (user_id, username, total_days, consecutive_days, last_logbo_date) VALUES (?, ?, 1, 1, ?)').run(userId, fullAcct, today);
+    return { total:  1, consecutive: 1, alreadyDone: false };
+  }
+  
+  if (record.last_logbo_date === today) {
+    if (record.username !== fullAcct) {
+      db.prepare('UPDATE logbo_records SET username = ?  WHERE user_id = ?').run(fullAcct, userId);
+    }
+    return { total:  record.total_days, consecutive: record.consecutive_days, alreadyDone: true };
+  }
+
+  const lastDate = new Date(record.last_logbo_date + 'T00:00:00Z');
+  const todayDate = new Date(today + 'T00:00:00Z');
+  const diffDays = Math.floor((todayDate - lastDate) / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 1) {
+    const newTotal = record.total_days + 1;
+    const newConsecutive = record.consecutive_days + 1;
+    db.prepare('UPDATE logbo_records SET username = ?, total_days = ?, consecutive_days = ?, last_logbo_date = ? WHERE user_id = ?')
+      .run(fullAcct, newTotal, newConsecutive, today, userId);
+    return { total: newTotal, consecutive:  newConsecutive, alreadyDone: false };
+  } else {
+    const newTotal = record.total_days + 1;
+    db.prepare('UPDATE logbo_records SET username = ?, total_days = ?, consecutive_days = 1, last_logbo_date = ? WHERE user_id = ? ')
+      .run(fullAcct, newTotal, today, userId);
+    return { total: newTotal, consecutive: 1, alreadyDone: false };
+  }
+}
+
+// ランキング取得
+function getRanking() {
+  const ranking = db.prepare(`
+    SELECT username, consecutive_days, total_days 
+    FROM logbo_records 
+    ORDER BY consecutive_days DESC, total_days DESC 
+    LIMIT 10
+  `).all();
+  
+  if (ranking.length === 0) {
+    return '現在、ログインボーナスのデータはございません。';
+  }
+  
+  let rankingText = '📊 **連続ログインボーナス ランキング TOP 10**\n\n';
+  ranking.forEach((record, index) => {
+    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.  `;
+    rankingText += `${medal} \`${record.username}\`\n`; 
+    rankingText += `   連続:  ${record.consecutive_days}日 / 合計: ${record.total_days}日\n\n`;
+  });
+  
+  return rankingText;
+}
+
+// 共通処理関数
+async function processLogboWithAcct(note, userId, acct) {
+  const isFollowerUser = await isFollower(userId);
+
+  if (! isFollowerUser) {
+    await cli.request('notes/create', {
+      text: `@${acct} ログインボーナスを受け取るには、私をフォローしてください。「follow me」と送っていただければフォローいたします。`,
+      replyId: note.id,
+      visibility: note.visibility === 'specified' ? 'specified' : 'public'
+    });
+    return;
+  }
+
+  const result = recordLogbo(userId, acct);
+
+  const reactionEmoji = result.alreadyDone ? '❌' : '⭕';
+  await cli.request('notes/reactions/create', {
+    noteId: note.id,
+    reaction: reactionEmoji,
+  });
+
+  const replyVisibility = note.visibility === 'specified' ? 'specified' :  'public';
+  let message = '';
+  
+  if (result. alreadyDone) {
+    message = `@${acct} 本日は既にログインボーナスを受取済みです。\n連続:  ${result.consecutive}日 / 合計: ${result.total}日`;
+  } else {
+    message = result.consecutive === 1 && result.total === 1
+      ? `@${acct} 🎉 初回ログインボーナスです！明日もまたお越しください。`
+      : `@${acct} 🎁 ログインボーナス！\n連続ログイン: ${result.consecutive}日目\n合計:  ${result.total}日`;
+  }
+
+  await cli.request('notes/create', {
+    text: message,
+    replyId: note.id,
+    visibility: replyVisibility
+  });
+}
+
+// ヘルパー関数
+function getFullAcct(user) {
+  const host = user.host || BOT_HOST; 
+
+// めいん
+mainChannel.on('mention', async (note) => {
+  console.log('=== Mention event fired ===');
+  
+  try {
+    const text = note.text || '';
+    const userId = note. userId;
+
+    console.log(`DEBUG: text = "${text}"`);
+    console.log(`DEBUG: userId = ${userId}`);
+    console.log(`DEBUG: botUserId = ${botUserId}`);
+    console.log(`DEBUG: text.includes('ランキング') = ${text.includes('ランキング')}`);
+
+    if (userId === botUserId) {
+      console.log('Skipped: self mention');
+      return;
+    }
+
+    const acct = getFullAcct(note.user);
+    console.log(`Mention received from @${acct}:  ${text}`);
+
+    // follow me処理
+    if (text.includes('follow me') || text.includes('フォローして')) {
+      console.log('>>> Executing:  follow me');
+      await followUser(userId);
+      await cli.request('notes/create', {
+        text:  `@${acct} フォローいたしました。「ログボ」と呟いてログインボーナスをお受け取りください。`,
+        replyId: note. id,
+        visibility: note. visibility === 'specified' ? 'specified' : 'public'
+      });
+      console.log('>>> Completed: follow me');
+      return;
+    }
+
+    // ランキング処理
+    if (text.includes('ランキング')) {
+      console.log('>>> Executing: ランキング');
+      const rankingText = getRanking();
+      console.log(`>>> Ranking text (${rankingText.length} chars): ${rankingText.substring(0, 100)}...`);
+      
+      const response = await cli.request('notes/create', {
+        text:  `@${acct}\n${rankingText}`,
+        replyId: note.id,
+        visibility: note.visibility === 'specified' ? 'specified' : 'public'
+      });
+      console.log('>>> Completed: ランキング', response);
+      return;
+    }
+
+    // ログボ処理
+    if (text.includes('ログボ')) {
+      console.log('>>> Executing: ログボ');
+      await processLogboWithAcct(note, userId, acct);
+      console.log('>>> Completed: ログボ');
+      return;
+    }
+
+    console. log('WARNING: No command matched');
+
+  } catch (error) {
+    console.error('! !! ERROR in mainChannel.on(mention):', error);
+    console.error('! !! Stack:', error.stack);
+  }
+});
+
+// ホームタイムライン監視
+const homeChannel = stream. useChannel('homeTimeline');
+
+homeChannel.on('note', async (note) => {
+  const text = note.text || '';
+  const userId = note. userId;
+
+  if (userId === botUserId) return;
+
+
+  const acct = getFullAcct(note.user);
+
+  // メンションがある場合の処理
+  if (note. mentions && note.mentions.includes(botUserId)) {
+    // ランキング処理（mainChannelで拾えなかった場合のバックアップ）
+    if (text.includes('ランキング')) {
+      const rankingText = getRanking();
+      await cli.request('notes/create', {
+        text: `@${acct}\n${rankingText}`,
+        replyId: note.id,
+        visibility: note.visibility === 'specified' ? 'specified' :  'public'
+      });
+      return;
+    }
+
+    // follow me処理（mainChannelで拾えなかった場合のバックアップ）
+    if (text.includes('follow me') || text.includes('フォローして')) {
+      await followUser(userId);
+      await cli.request('notes/create', {
+        text: `@${acct} フォローいたしました。「ログボ」と呟いてログインボーナスをお受け取りください。`,
+        replyId: note.id,
+        visibility: note.visibility === 'specified' ?  'specified' : 'public'
+      });
+      return;
+    }
+
+    // ログボ処理
+    if (text.includes('ログボ')) {
+      await processLogboWithAcct(note, userId, acct);
+      return;
+    }
+
+    // その他のメンションは無視（mainChannelで処理済）
+    return;
+  }
+
+  if (text.includes('ログボ')) {
+    await processLogboWithAcct(note, userId, acct);
+  }
+});
+
+console.log('Logbo bot started (without dotenv).');
+console.log(`Bot Hostname: ${BOT_HOST}`);
