@@ -1,0 +1,9 @@
+{
+  "name": "logbo-bot",
+  "version":  "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "misskey-js": "^2024.10.1",
+    "better-sqlite3": "^11.0.0"
+  }
+}
