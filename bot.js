@@ -75,19 +75,23 @@ async function followUser(userId) {
 }
 
 // ログボ記録処理
-function recordLogbo(userId, username) {
+function recordLogbo(userId, username, host) {
   const today = getLogboDate();
+  
+  // フルアカウント名を作成（リモートユーザー対応）
+  const fullUsername = host ? `${username}@${host}` : username;
+  
   const record = db.prepare('SELECT * FROM logbo_records WHERE user_id = ?').get(userId);
 
   if (!record) {
     // 初回ログボ
-    db.prepare('INSERT INTO logbo_records (user_id, username, total_days, consecutive_days, last_logbo_date) VALUES (?, ?, 1, 1, ?)').run(userId, username, today);
-    return { total: 1, consecutive: 1, alreadyDone: false };
+    db.prepare('INSERT INTO logbo_records (user_id, username, total_days, consecutive_days, last_logbo_date) VALUES (?, ?, 1, 1, ?)').run(userId, fullUsername, today);
+    return { total:  1, consecutive: 1, alreadyDone: false };
   }
 
   if (record.last_logbo_date === today) {
     // 今日既にログボ済み
-    return { total: record.total_days, consecutive: record.consecutive_days, alreadyDone: true };
+    return { total: record. total_days, consecutive: record. consecutive_days, alreadyDone:  true };
   }
 
   // 前回のログボ日との差分計算
@@ -100,14 +104,14 @@ function recordLogbo(userId, username) {
     const newTotal = record.total_days + 1;
     const newConsecutive = record.consecutive_days + 1;
     db.prepare('UPDATE logbo_records SET username = ?, total_days = ?, consecutive_days = ?, last_logbo_date = ? WHERE user_id = ?')
-      .run(username, newTotal, newConsecutive, today, userId);
+      .run(fullUsername, newTotal, newConsecutive, today, userId);
     return { total: newTotal, consecutive: newConsecutive, alreadyDone: false };
   } else {
     // 連続途切れた
     const newTotal = record.total_days + 1;
     db.prepare('UPDATE logbo_records SET username = ?, total_days = ?, consecutive_days = 1, last_logbo_date = ? WHERE user_id = ?')
-      .run(username, newTotal, today, userId);
-    return { total: newTotal, consecutive: 1, alreadyDone: false };
+      .run(fullUsername, newTotal, today, userId);
+    return { total:  newTotal, consecutive: 1, alreadyDone: false };
   }
 }
 
@@ -135,10 +139,11 @@ function getRanking() {
 }
 
 // タイムライン監視
-// note: botが未フォローの人のメンションを拾うため、hybridTimeline推奨
-const timelineChannel = stream.useChannel('hybridTimeline');
+// 1. 自分宛ての通知・メンションを監視するチャンネル（main）
+// 未フォローの人からの「follow me」はここで確実に拾います
+const mainChannel = stream.useChannel('main');
 
-timelineChannel.on('note', async (note) => {
+mainChannel.on('mention', async (note) => {
   const text = note.text || '';
   const userId = note.userId;
   const username = note.user.username;
@@ -146,16 +151,29 @@ timelineChannel.on('note', async (note) => {
   // 自分の投稿は無視
   if (userId === botUserId) return;
 
-  // 「follow me」でフォロー
-  // メンションが含まれており、かつキーワードがある場合
-  if ((text.includes('follow me') || text.includes('フォローして')) && note.mentions && note.mentions.includes(botUserId)) {
+  console.log(`Mention received from @${username}: ${text}`); // ログで確認
+
+  // 「follow me」または「フォローして」が含まれていたら
+  if (text.includes('follow me') || text.includes('フォローして')) {
     await followUser(userId);
     await cli.request('notes/create', {
       text: `@${username} フォローいたしました。「ログボ」と呟いてログインボーナスをお受け取りください。`,
       replyId: note.id,
     });
-    return;
   }
+});
+
+// 2. フォローしているユーザーの投稿を監視するチャンネル（homeTimeline）
+// 既にフォロー済みの友達の「ログボ」はここで拾います
+const homeChannel = stream.useChannel('homeTimeline');
+
+homeChannel.on('note', async (note) => {
+  const text = note.text || '';
+  const userId = note.userId;
+  const username = note.user.username;
+
+  // 自分の投稿は無視
+  if (userId === botUserId) return;
 
   // 「ランキング」でランキング表示
   if (text.includes('ランキング') && note.mentions && note.mentions.includes(botUserId)) {
@@ -172,21 +190,23 @@ timelineChannel.on('note', async (note) => {
     // フォロワーチェック
     const isFollowerUser = await isFollower(userId);
 
-    if (!isFollowerUser) {
-      // 未フォローの場合は誘導（頻繁なスパムにならないようメンション時のみ反応するなど調整可だが、一旦反応させる）
+    if (! isFollowerUser) {
+      const mentionUser = host ? `@${username}@${host}` : `@${username}`;
       await cli.request('notes/create', {
-        text: `@${username} ログインボーナスを受け取るには、私をフォローしてください。「follow me」とメンションを送っていただければフォローいたします。`,
+        text:  `${mentionUser} ログボするには私をフォローしてね！「follow me」ってメンションしてね`,
         replyId: note.id,
       });
       return;
     }
 
-    const result = recordLogbo(userId, username);
+    const result = recordLogbo(userId, username, host);
 
     // リアクション
+    const reactionEmoji = result.alreadyDone ? '❌' : '⭕';
+
     await cli.request('notes/reactions/create', {
       noteId: note.id,
-      reaction: '⭕',
+      reaction: reactionEmoji,
     });
 
     // リプライ
