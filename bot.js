@@ -1,6 +1,7 @@
 import * as Misskey from 'misskey-js';
 import Database from 'better-sqlite3';
 // import { WebSocket } from 'ws';
+import fs from 'fs'; // ★追加: フォルダ作成用
 import pkg from 'ws';
 const WebSocket = pkg.WebSocket || pkg.default || pkg;
 
@@ -88,10 +89,10 @@ function recordLogbo(userId, username, host) {
     db.prepare('INSERT INTO logbo_records (user_id, username, total_days, consecutive_days, last_logbo_date) VALUES (?, ?, 1, 1, ?)').run(userId, fullUsername, today);
     return { total:  1, consecutive: 1, alreadyDone: false };
   }
-
   if (record.last_logbo_date === today) {
-    // 今日既にログボ済み
-    return { total: record. total_days, consecutive: record. consecutive_days, alreadyDone:  true };
+    // 今日既にログボ済み（usernameは最新に更新）
+    db.prepare('UPDATE logbo_records SET username = ? WHERE user_id = ?').run(fullUsername, userId);
+    return { total: record.total_days, consecutive: record.consecutive_days, alreadyDone: true };
   }
 
   // 前回のログボ日との差分計算
@@ -131,102 +132,136 @@ function getRanking() {
   let rankingText = '📊 **連続ログインボーナス ランキング TOP 10**\n\n';
   ranking.forEach((record, index) => {
     const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}. `;
-    rankingText += `${medal} @${record.username}\n`;
+    rankingText += `${medal} \`${record.username}\`\n`;  // メンションしちゃってまずいのでなおす
     rankingText += `   連続: ${record.consecutive_days}日 / 合計: ${record.total_days}日\n\n`;
   });
 
   return rankingText;
 }
 
-// タイムライン監視
+// acct: 表示用の名前 (user@host), username: 純粋なユーザー名, host: ホスト名
+async function processLogboWithAcct(note, userId, acct, username, host) {
+  // フォロワーチェック
+  const isFollowerUser = await isFollower(userId);
+
+  if (!isFollowerUser) {
+    await cli.request('notes/create', {
+      text: `@${acct} ログボするには私をフォローしてね！「follow me」ってメンションしてね`,
+      replyId: note.id,
+      visibility: note.visibility === 'specified' ? 'specified' : 'public'
+    });
+    return;
+  }
+
+  // ★重要: お前の recordLogbo は (userId, username, host) を求めているのでこう渡す
+  const result = recordLogbo(userId, username, host);
+
+  // リアクション
+  const reactionEmoji = result.alreadyDone ? '❌' : '⭕';
+  await cli.request('notes/reactions/create', {
+    noteId: note.id,
+    reaction: reactionEmoji,
+  });
+
+  // リプライ
+  const replyVisibility = note.visibility === 'specified' ? 'specified' : 'public';
+  let message = '';
+
+  if (result.alreadyDone) {
+    message = `@${acct} 本日は既にログインボーナスを受取済みです。\n連続: ${result.consecutive}日 / 合計: ${result.total}日`;
+  } else {
+    message = result.consecutive === 1 && result.total === 1
+      ? `@${acct} 🎉 初回ログインボーナスです！明日もまたお越しください。`
+      : `@${acct} 🎁 ログインボーナス！\n連続ログイン: ${result.consecutive}日目\n合計: ${result.total}日`;
+  }
+
+  await cli.request('notes/create', {
+    text: message,
+    replyId: note.id,
+    visibility: replyVisibility
+  });
+}
+
 // 1. 自分宛ての通知・メンションを監視するチャンネル（main）
-// 未フォローの人からの「follow me」はここで確実に拾います
 const mainChannel = stream.useChannel('main');
 
 mainChannel.on('mention', async (note) => {
   const text = note.text || '';
   const userId = note.userId;
-  const username = note.user.username;
+
+  // ▼▼▼ ホスト名とユーザー名を確実に取得 ▼▼▼
+  const user = note.user;
+  const username = user.username;
+  const host = user.host;
+  const acct = host ? `${username}@${host}` : username;
 
   // 自分の投稿は無視
   if (userId === botUserId) return;
 
-  console.log(`Mention received from @${username}: ${text}`); // ログで確認
+  console.log(`Mention received from @${acct}: ${text}`);
 
-  // 「follow me」または「フォローして」が含まれていたら
+  // 「follow me」処理
   if (text.includes('follow me') || text.includes('フォローして')) {
     await followUser(userId);
     await cli.request('notes/create', {
-      text: `@${username} フォローいたしました。「ログボ」と呟いてログインボーナスをお受け取りください。`,
+      text: `@${acct} フォローいたしました。「ログボ」と呟いてログインボーナスをお受け取りください。`,
       replyId: note.id,
+      visibility: note.visibility === 'specified' ? 'specified' : 'public'
     });
+  }
+
+  // ランキング処理
+  if (text.includes('ランキング')) {
+    const rankingText = getRanking();
+    await cli.request('notes/create', {
+      text: `@${acct}\n${rankingText}`,
+      replyId: note.id,
+      visibility: note.visibility === 'specified' ? 'specified' : 'public'
+    });
+  }
+
+  // ログボ処理
+  if (text.includes('ログボ')) {
+    await processLogboWithAcct(note, userId, acct, username, host);
   }
 });
 
 // 2. フォローしているユーザーの投稿を監視するチャンネル（homeTimeline）
-// 既にフォロー済みの友達の「ログボ」はここで拾います
 const homeChannel = stream.useChannel('homeTimeline');
 
 homeChannel.on('note', async (note) => {
   const text = note.text || '';
   const userId = note.userId;
-  const username = note.user.username;
+
+  const user = note.user;
+  const username = user.username;
+  const host = user.host;
+  const acct = host ? `${username}@${host}` : username;
 
   // 自分の投稿は無視
   if (userId === botUserId) return;
 
-  // 「ランキング」でランキング表示
+  // 自分へのメンションが含まれている場合は無視（mainChannelで処理するため）
+  if (note.mentions && note.mentions.includes(botUserId)) {
+    return;
+  }
+
+  // 「ランキング」処理（メンションなし）
   if (text.includes('ランキング') && note.mentions && note.mentions.includes(botUserId)) {
     const rankingText = getRanking();
     await cli.request('notes/create', {
-      text: `@${username}\n${rankingText}`,
+      text: `@${acct}\n${rankingText}`,
       replyId: note.id,
+      visibility: note.visibility === 'specified' ? 'specified' : 'public'
     });
     return;
   }
 
-  // 「ログボ」でログボ処理
+  // 「ログボ」処理
   if (text.includes('ログボ')) {
-    // フォロワーチェック
-    const isFollowerUser = await isFollower(userId);
-
-    if (! isFollowerUser) {
-      const mentionUser = host ? `@${username}@${host}` : `@${username}`;
-      await cli.request('notes/create', {
-        text:  `${mentionUser} ログボするには私をフォローしてね！「follow me」ってメンションしてね`,
-        replyId: note.id,
-      });
-      return;
-    }
-
-    const result = recordLogbo(userId, username, host);
-
-    // リアクション
-    const reactionEmoji = result.alreadyDone ? '❌' : '⭕';
-
-    await cli.request('notes/reactions/create', {
-      noteId: note.id,
-      reaction: reactionEmoji,
-    });
-
-    // リプライ
-    if (result.alreadyDone) {
-      await cli.request('notes/create', {
-        text: `@${username} 本日は既にログインボーナスを受取済みです。\n連続: ${result.consecutive}日 / 合計: ${result.total}日`,
-        replyId: note.id,
-      });
-    } else {
-      const message = result.consecutive === 1 && result.total === 1
-        ? `@${username} 🎉 初回ログインボーナスです！明日もまたお越しください。`
-        : `@${username} 🎁 ログインボーナス！\n連続ログイン: ${result.consecutive}日目\n合計: ${result.total}日`;
-
-      await cli.request('notes/create', {
-        text: message,
-        replyId: note.id,
-      });
-    }
+    await processLogboWithAcct(note, userId, acct, username, host);
   }
 });
 
-console.log('Logbo bot started with Polite mode.');
+console.log('Logbo bot started with Anti-Bombing mode.');
 console.log(`Logbo date boundary: JST 05:00`);
