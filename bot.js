@@ -212,6 +212,29 @@ async function processNote(note, channelName) {
       await processLogboWithAcct(note, userId, acct);
       return;
     }
+
+    // メンションされているときの処理
+    const isMentioned = note.mentions && note.mentions.includes(botUserId);
+    if (isMentioned){
+      // 認証コードの確認
+      if (pendingAuth.has(userId)) {
+          const requiredCode = pendingAuth.get(userId);
+          if (note.text && note.text.includes(requiredCode)) {
+              // 正解
+              pendingAuth.delete(userId);
+              await cli.request('notes/reactions/create', { noteId: note.id, reaction: '✅' });
+              await processLogboWithAcct(note, userId, acct); // ログボ判定
+          } else {
+              // 不正解
+              await cli.request('notes/create', {
+                  text: `@${acct} 認証コードが確認できませんでした...\n返信に「${requiredCode}」を含めてください。`,
+                  replyId: note.id,
+                  visibility: 'public'
+              });
+          }
+        return;
+      }
+    }
 }
 
 // 認証待ちのユーザーIDと正解コードを保存するリスト
@@ -275,22 +298,6 @@ async function processLogboWithAcct(note, userId, acct) {
     }
 
     // 自動化対策（ver 2.0）
-    if (pendingAuth.has(userId)) {
-        const requiredCode = pendingAuth.get(userId);
-        if (note.text && note.text.includes(requiredCode)) {
-            // 正解
-            pendingAuth.delete(userId);
-            await cli.request('notes/reactions/create', { noteId: note.id, reaction: '✅' });
-        } else {
-            // 不正解
-            await cli.request('notes/create', {
-                text: `@${acct} 認証コードが確認できませんでした...\n返信に「${requiredCode}」を含めてください。`,
-                replyId: note.id,
-                visibility: 'public'
-            });
-            return;
-        }
-    } 
     // B. 新規かつ未実施: 00秒判定，認証コード送る
     else if (new Date(note.createdAt).getSeconds() === 0) {
         const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -327,6 +334,10 @@ async function processLogboWithAcct(note, userId, acct) {
       message = result.consecutive === 1 && result.total === 1
         ? `@${acct} $[sparkle **初回**ログインボーナスです！] 明日もまたログインしてください。`
         : `@${acct} **ログインボーナス！**\n$[sparkle 連続ログイン: ${result.consecutive}日目]\n合計: ${result.total}日`;
+      // 認証待ちに入ってたら削除
+      if (pendingAuth.has(userId)) {
+              pendingAuth.delete(userId);
+      }
     }
 
     await cli.request('notes/create', { text: message, replyId: note.id, visibility: replyVisibility });
