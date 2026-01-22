@@ -183,7 +183,7 @@ async function processNote(note, channelName) {
       await cli.request('notes/create', {
         text: `@${acct} フォローいたしました。「ログボ」と呟いてログインボーナスをお受け取りください。`,
         replyId: note.id,
-        visibility: note.visibility === 'specified' ? 'specified' : 'public'
+        visibility: note.visibility === 'specified' ? 'specified' : 'home'
       });
       return;
     }
@@ -198,13 +198,13 @@ async function processNote(note, channelName) {
       await cli.request('notes/create', {
         text: `@${acct}\n${rankingText}`,
         replyId: note.id,
-        visibility: note.visibility === 'specified' ? 'specified' : 'public'
+        visibility: note.visibility === 'specified' ? 'specified' : 'home'
       });
       return;
     }
 
     // ログボ正規表現
-    const logboPattern = /ログボ|ろぐぼ|ログインボーナス|ろぐいんぼーなす/;
+    const logboPattern = /ログボ|ろぐぼ|ログインボーナス|ろぐいんぼーなす|rogubo/i;
     // ログボ
     // if (text.includes('ログボ')) {
     if (logboPattern.test(text)) {
@@ -244,12 +244,18 @@ function checkLogboStatus(userId) {
 // メイン処理
 async function processLogboWithAcct(note, userId, acct) {
   try {
+    // DMおぷしょん
+    const dmOptions = {
+      visibility: 'specified',
+      visibleUserIds: [userId], // 宛先つけないとだめらしい
+    };
+
     const isFollowerUser = await isFollower(userId);
     if (!isFollowerUser) {
       await cli.request('notes/create', {
-        text: `@${acct} ログインボーナスを受け取るには、私をフォローしてください。「follow me」と送っていただければフォローいたします。`,
+        text: `@${acct} ログインボーナスを受け取るには、私をフォローしてください。そのあと、「follow me」と送っていていただければ、ログボが可能になります。`,
         replyId: note.id,
-        visibility: note.visibility === 'specified' ? 'specified' : 'public'
+        ...dmOptions // DM化
       });
       return;
     }
@@ -269,7 +275,7 @@ async function processLogboWithAcct(note, userId, acct) {
         await cli.request('notes/create', {
             text: `@${acct} 本日は既にログインボーナスを**受取済み**です...\n$[sparkle **連続: ${status.consecutive}日**] / **合計: ${status.total}日**`,
             replyId: note.id,
-            visibility: 'public'
+            ...dmOptions // DM化
         });
         return; // ここで終了・認証には進まない
     }
@@ -286,7 +292,7 @@ async function processLogboWithAcct(note, userId, acct) {
             await cli.request('notes/create', {
                 text: `@${acct} 認証コードが確認できませんでした...\n返信に「${requiredCode}」を含めてください。`,
                 replyId: note.id,
-                visibility: 'public'
+                visibility: 'home'
             });
             return;
         }
@@ -299,7 +305,7 @@ async function processLogboWithAcct(note, userId, acct) {
         await cli.request('notes/create', {
             text: `@${acct} 【自動化対策】\n$[fg.color=ff0000 ログボを受け取るには認証が必要です。]\n返信で「${code}」と送ってください。`,
             replyId: note.id,
-            visibility: 'public'
+            visibility: 'home'
         });
         console.log(`>>> Auth challenge sent to ${acct} (Code: ${code})`);
         return; // 書き込まずに終了
@@ -316,7 +322,7 @@ async function processLogboWithAcct(note, userId, acct) {
         // リアクション重複エラーは無視
     }
 
-    const replyVisibility = note.visibility === 'specified' ? 'specified' : 'public';
+    const replyVisibility = note.visibility === 'specified' ? 'specified' : 'home';
     let message = '';
     
     // ここは recordLogbo の戻り値を使う（さっき書き込んだ最新の結果）
@@ -380,6 +386,24 @@ homeChannel.on('note', async (note) => {
     console.error('[HOME] Error:', err);
   }
 });
+
+const hybridChannel = stream.useChannel('hybridTimeline');  // SocialTLも見る
+
+hybridChannel.on('note', async (note) => {
+  try {
+    if (note.userId === botUserId) return;
+
+    if (checkAndLock(note.id)) {
+      console.log(`[SKIP-HYBRID] Duplicate detected: ${note.id}`);
+      return;
+    }
+
+    await processNote(note, 'HYBRID');
+  } catch (err) {
+    console.error('[HYBRID] Error:', err);
+  }
+});
+
 
 console.log('Logbo bot started with Fixed Functions.');
 console.log(`Bot Hostname: ${BOT_HOST}`);
