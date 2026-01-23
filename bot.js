@@ -371,7 +371,6 @@ const hybridChannel = stream.useChannel('hybridTimeline');  // SocialTLも見る
 hybridChannel.on('note', async (note) => {
   try {
     if (checkAndLock(note.id)) {
-      note.mentions && note.mentions[0] && note.mentions[0].
       console.log(`[SKIP-HYBRID] Duplicate detected: ${note.id}`);
       return;
     }
