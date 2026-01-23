@@ -168,7 +168,6 @@ async function processNote(note, channelName) {
       console.log(`[${channelName}] Skipped processing note: isBot`);
       return;
   }
-  console.log(note.user.isBot, note.mentions,botUser.id)
 
   if (note.mentions && note.mentions.length === 1 && note.mentions.some(e => e === botUser.id)) {
   // is mention and only only mentions bot
