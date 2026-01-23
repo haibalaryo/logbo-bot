@@ -51,6 +51,8 @@ npm install
 - `MISSKEY_URL`:MisskeyサーバーのURL (例: https://msky.haibala.com)
 - `MISSKEY_TOKEN`:ボットアカウントのAPIトークン
 
+.envファイルを使用し、Dockerを使用しない場合には、`node --env-file=.env bot.js`と実行してください。
+
 ### 起動
 Docker Composeを使用する場合は以下を実行してください。
 ```
@@ -84,3 +86,4 @@ Dockerを使用する場合、このディレクトリをボリュームとし�
 ## 注意事項
 1. 本ボットは、Misskey独自のMFMやカスタム絵文字を使用しています。接続先のサーバーで絵文字が利用できない場合、表示が崩れる可能性があります。
 1. 連続ログイン日数は、前回のログボ取得から日付（午前5時区切り）が連続している場合のみ加算されます。
+

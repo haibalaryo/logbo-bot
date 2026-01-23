@@ -39,14 +39,15 @@ const stream = new Misskey.Stream(MISSKEY_URL, {
   token: MISSKEY_TOKEN,
 });
 
-let botUserId;
-cli.request('i').then((res) => {
-  botUserId = res.id;
-  console.log(`Bot user ID: ${botUserId}`);
-}).catch(err => {
-  console.error('Login failed:', err);
-  process.exit(1);
-});
+const botUser = 
+  await (async ()=>{
+    try {
+      return await cli.request('i')
+    } catch (err) {
+      console.error('Login failed:', err);
+      process.exit(1);
+    }
+  })()
 
 // DB初期化
 const db = new Database('./data/database.db');
@@ -157,17 +158,19 @@ function getRanking() {
 
 // ヘルパー: ノート処理の本体（ロックチェック通過後に呼ばれる）
 async function processNote(note, channelName) {
-    const userId = note.userId;
-    const text = note.text || '';
-    const acct = getFullAcct(note.user);
-    
-    // stationstaff無視
-    if (note.user.username === 'stationstaff') {
-        console.log(`[${channelName}] Ignoring note from @${acct} (stationstaff).`);
-        return; // ここで強制終了：これ以降の処理は一切しない
-    }
+  const userId = note.userId;
+  const text = note.text || '';
+  const acct = getFullAcct(note.user);
+ 
+  console.log(`[${channelName}] Processing note from @${acct}: ${text}`);
 
-    console.log(`[${channelName}] Processing note from @${acct}: ${text}`);
+  if (note.user && note.user.isBot) {
+      console.log(`[${channelName}] Skipped processing note: isBot`);
+      return;
+  }
+
+  if (note.mentions && note.mentions.length === 1 && note.mentions.some(e => e === botUser.id)) {
+  // is mention and only only mentions bot
 
     // Follow Me
     if (text.includes('follow me') || text.includes('フォローして')) {
@@ -191,8 +194,6 @@ async function processNote(note, channelName) {
 
     // ランキング正規表現
     const rankingPattern = /ランキング|らんきんぐ|ranking/i;
-    // ランキング
-    //if (text.includes('ランキング')) {
     if (rankingPattern.test(text)) {
       const rankingText = getRanking();
       await cli.request('notes/create', {
@@ -202,16 +203,14 @@ async function processNote(note, channelName) {
       });
       return;
     }
+  }
 
-    // ログボ正規表現
-    const logboPattern = /ログボ|ろぐぼ|ログインボーナス|ろぐいんぼーなす|rogubo/i;
-    // ログボ
-    // if (text.includes('ログボ')) {
-    if (logboPattern.test(text)) {
-      // ★ここで processLogboWithAcct を呼んでいるので、この関数が存在しないとエラーになる
-      await processLogboWithAcct(note, userId, acct);
-      return;
-    }
+  // ログボ正規表現
+  const logboPattern = /ログボ|ろぐぼ|ログインボーナス|ろぐいんぼーなす|rogubo/i;
+  if (logboPattern.test(text)) {
+    await processLogboWithAcct(note, userId, acct);
+    return;
+  }
 }
 
 // 認証待ちのユーザーIDと正解コードを保存するリスト
@@ -251,6 +250,7 @@ async function processLogboWithAcct(note, userId, acct) {
     };
 
     const isFollowerUser = await isFollower(userId);
+
     if (!isFollowerUser) {
       await cli.request('notes/create', {
         text: `@${acct} ログインボーナスを受け取るには、私をフォローしてください。そのあと、「follow me」と送っていていただければ、ログボが可能になります。`,
@@ -263,52 +263,52 @@ async function processLogboWithAcct(note, userId, acct) {
     const status = checkLogboStatus(userId);
 
     if (status.alreadyDone) {
-        try {
-            await cli.request('notes/reactions/create', { 
-                noteId: note.id, 
-                reaction: ':ablobcatblinkhyper:' 
-            });
-        } catch (e) {
-            // 無視
-        }
-
-        await cli.request('notes/create', {
-            text: `@${acct} 本日は既にログインボーナスを**受取済み**です...\n$[sparkle **連続: ${status.consecutive}日**] / **合計: ${status.total}日**`,
-            replyId: note.id,
-            ...dmOptions // DM化
+      try {
+        await cli.request('notes/reactions/create', { 
+          noteId: note.id, 
+          reaction: ':ablobcatblinkhyper:' 
         });
-        return; // ここで終了・認証には進まない
+      } catch (e) {
+        // 無視
+      }
+
+      await cli.request('notes/create', {
+        text: `@${acct} 本日は既にログインボーナスを**受取済み**です...\n$[sparkle **連続: ${status.consecutive}日**] / **合計: ${status.total}日**`,
+        replyId: note.id,
+        ...dmOptions // DM化
+      });
+      return; // ここで終了・認証には進まない
     }
 
     // 自動化対策（ver 2.0）
     if (pendingAuth.has(userId)) {
-        const requiredCode = pendingAuth.get(userId);
-        if (note.text && note.text.includes(requiredCode)) {
-            // 正解
-            pendingAuth.delete(userId);
-            await cli.request('notes/reactions/create', { noteId: note.id, reaction: '✅' });
-        } else {
-            // 不正解
-            await cli.request('notes/create', {
-                text: `@${acct} 認証コードが確認できませんでした...\n返信に「${requiredCode}」を含めてください。`,
-                replyId: note.id,
-                visibility: 'home'
-            });
-            return;
-        }
+      const requiredCode = pendingAuth.get(userId);
+      if (note.text && note.text.includes(requiredCode)) {
+        // 正解
+        pendingAuth.delete(userId);
+        await cli.request('notes/reactions/create', { noteId: note.id, reaction: '✅' });
+      } else {
+        // 不正解
+        await cli.request('notes/create', {
+          text: `@${acct} 認証コードが確認できませんでした...\n返信に「${requiredCode}」を含めてください。`,
+          replyId: note.id,
+          visibility: 'home'
+        });
+        return;
+      }
     } 
     // B. 新規かつ未実施: 00秒判定，認証コード送る
     else if (new Date(note.createdAt).getSeconds() === 0) {
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        pendingAuth.set(userId, code);
+      const code = `00000${Math.floor(Math.random() * 1000000)}`.slice(-6);
+      pendingAuth.set(userId, code);
 
-        await cli.request('notes/create', {
-            text: `@${acct} 【自動化対策】\n$[fg.color=ff0000 ログボを受け取るには認証が必要です。]\n返信で「${code}」と送ってください。`,
-            replyId: note.id,
-            visibility: 'home'
-        });
-        console.log(`>>> Auth challenge sent to ${acct} (Code: ${code})`);
-        return; // 書き込まずに終了
+      await cli.request('notes/create', {
+        text: `@${acct} 【自動化対策】\n$[fg.color=ff0000 ログボを受け取るには認証が必要です。]\n返信で「${code}」と送ってください。`,
+        replyId: note.id,
+        visibility: 'home'
+      });
+      console.log(`>>> Auth challenge sent to ${acct} (Code: ${code})`);
+      return; // 書き込まずに終了
     }
     // 自動化クリア
 
@@ -316,10 +316,10 @@ async function processLogboWithAcct(note, userId, acct) {
     const result = recordLogbo(userId, acct);
     
     try {
-        const reactionEmoji = result.alreadyDone ? ':ablobcatblinkhyper:' : ':blobcat_fun_c30:';
-        await cli.request('notes/reactions/create', { noteId: note.id, reaction: reactionEmoji });
+      const reactionEmoji = result.alreadyDone ? ':ablobcatblinkhyper:' : ':blobcat_fun_c30:';
+      await cli.request('notes/reactions/create', { noteId: note.id, reaction: reactionEmoji });
     } catch (e) {
-        // リアクション重複エラーは無視
+      // リアクション重複エラーは無視
     }
 
     const replyVisibility = note.visibility === 'specified' ? 'specified' : 'home';
@@ -356,34 +356,13 @@ const mainChannel = stream.useChannel('main');
 
 mainChannel.on('mention', async (note) => {
   try {
-    if (note.userId === botUserId) return;
-
     if (checkAndLock(note.id)) {
         console.log(`[SKIP-MAIN] Duplicate detected: ${note.id}`);
         return;
     }
-    
     await processNote(note, 'MAIN');
   } catch (err) {
     console.error('[MAIN] Error:', err);
-  }
-});
-
-const homeChannel = stream.useChannel('homeTimeline');
-
-homeChannel.on('note', async (note) => {
-  try {
-    if (note.userId === botUserId) return;
-
-    if (checkAndLock(note.id)) {
-        console.log(`[SKIP-HOME] Duplicate detected: ${note.id}`);
-        return;
-    }
-
-    await processNote(note, 'HOME');
-    
-  } catch (err) {
-    console.error('[HOME] Error:', err);
   }
 });
 
@@ -391,8 +370,6 @@ const hybridChannel = stream.useChannel('hybridTimeline');  // SocialTLも見る
 
 hybridChannel.on('note', async (note) => {
   try {
-    if (note.userId === botUserId) return;
-
     if (checkAndLock(note.id)) {
       console.log(`[SKIP-HYBRID] Duplicate detected: ${note.id}`);
       return;
