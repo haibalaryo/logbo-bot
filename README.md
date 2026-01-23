@@ -2,7 +2,7 @@
 Misskey Login Bonus Bot for msky.haibala.com
 
 ## サンプル
-`msky.haibala.com` で動作している子
+`msky.haibala.com` で動作している子だよ
 
 https://msky.haibala.com/@loginbonus
 
