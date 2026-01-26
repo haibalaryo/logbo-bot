@@ -8,3 +8,5 @@ database.db
 data/*
 # gitkeepだけ許可
 !data/.gitkeep
+# backup排除
+**/*backup*/
