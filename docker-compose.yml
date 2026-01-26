@@ -1,6 +1,6 @@
 services:
   logbo-bot:
-    build:  .
+    image: ghcr.io/haibalaryo/logbo-bot:latest
     container_name: logbo-bot
     env_file:
       - .env

@@ -1,16 +1,20 @@
-FROM node:20-alpine
+FROM node:20-slim
 
-# 作業ディレクトリを設定
 WORKDIR /app
 
-# package.jsonとpackage-lock.jsonをコピー
+# better-sqlite3 ビルド用ツールインストール→キャッシュ削除
+RUN apt-get update && \
+    apt-get install -y python3 make g++ build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY package*.json ./
 
-# 依存パッケージをインストール
-RUN npm install
+# 依存関係インストール
+RUN npm ci --omit=dev
 
-# アプリケーションのコードをコピー
+# ソースコードをコピー
 COPY . .
 
-# botを起動
+# 実行
 CMD ["node", "bot.js"]

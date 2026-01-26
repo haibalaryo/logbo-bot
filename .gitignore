@@ -4,3 +4,7 @@ database.db
 .env
 *.log
 .DS_Store
+# dataフォルダの中身は無視
+data/*
+# gitkeepだけ許可
+!data/.gitkeep
