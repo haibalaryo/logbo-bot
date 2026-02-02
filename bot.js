@@ -2,6 +2,7 @@ import * as Misskey from 'misskey-js';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import pkg from 'ws';
+import cron from 'node-cron';
 
 // WebSocketポリフィル
 const WebSocket = pkg.WebSocket || pkg.default || pkg;
@@ -381,6 +382,33 @@ hybridChannel.on('note', async (note) => {
   }
 });
 
+// ---------------------------------------------------------
+// 毎日22:00にランキングを投稿
+// ---------------------------------------------------------
+cron.schedule('0 22 * * *', async () => {
+  console.log('Running scheduled ranking tweet...');
+  try {
+    const rankingText = getRanking();
+    
+    // データがない場合はスキップするか、ログだけ出して終了
+    if (rankingText === '現在、データはありません。') {
+      console.log('Ranking is empty, skipping scheduled tweet.');
+      return;
+    }
+
+    // 投稿内容（内容はgetRankingのまま）
+    const noteText = `${rankingText}\n\n#すてーしょんログボbotランキング`;
+
+    await cli.request('notes/create', {
+      text: noteText,
+      visibility: 'public' // 公開範囲
+    });
+
+    console.log('>>> Scheduled ranking tweet sent.');
+  } catch (err) {
+    console.error('Failed to send scheduled ranking:', err);
+  }
+});
 
 console.log('Logbo bot started with Fixed Functions.');
 console.log(`Bot Hostname: ${BOT_HOST}`);
