@@ -3,6 +3,8 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import pkg from 'ws';
 import cron from 'node-cron';
+import express from 'express';
+import cors from 'cors';
 
 // WebSocketポリフィル
 const WebSocket = pkg.WebSocket || pkg.default || pkg;
@@ -11,6 +13,7 @@ global.WebSocket = WebSocket;
 // 環境変数
 const MISSKEY_URL = process.env.MISSKEY_URL;
 const MISSKEY_TOKEN = process.env.MISSKEY_TOKEN;
+const API_PORT = process.env.API_PORT || 3000; // カレンダー用ポート設定
 
 if (!MISSKEY_URL || !MISSKEY_TOKEN) {
   console.error('Error: Set MISSKEY_URL and MISSKEY_TOKEN in .env or docker-compose environment');
@@ -40,18 +43,20 @@ const stream = new Misskey.Stream(MISSKEY_URL, {
   token: MISSKEY_TOKEN,
 });
 
-const botUser = 
-  await (async ()=>{
+// ログイン確認
+const botUser = await (async ()=>{
     try {
       return await cli.request('i')
     } catch (err) {
       console.error('Login failed:', err);
       process.exit(1);
     }
-  })()
+})();
 
 // DB初期化
 const db = new Database('./data/database.db');
+
+// 通常テーブル
 db.exec(`
   CREATE TABLE IF NOT EXISTS logbo_records (
     user_id TEXT PRIMARY KEY,
@@ -62,12 +67,82 @@ db.exec(`
   )
 `);
 
-// 
+// 履歴テーブル
+db.exec(`
+  CREATE TABLE IF NOT EXISTS logbo_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    logbo_date TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, logbo_date)
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_date ON logbo_history(user_id, logbo_date);
+`);
+
+// ---------------------------------------------------------
+// APIサーバー機能
+// ---------------------------------------------------------
+const app = express();
+
+// CORS設定（特定ドメイン からのアクセスのみ許可）
+app.use(cors({
+    origin: ['https://logbo.haibala.com', 'http://localhost:5173', 'http://127.0.0.1:5500'],
+    methods: ['GET']
+}));
+
+// API: 特定ユーザーのカレンダーデータを取得
+app.get('/api/calendar/:username', (req, res) => {
+    try {
+        const { username } = req.params;
+        const { year, month } = req.query;
+
+        // デコード
+        const decodedName = decodeURIComponent(username);
+
+        // 1. username から user_id を特定
+        const userRecord = db.prepare('SELECT user_id FROM logbo_records WHERE username = ?').get(decodedName);
+        
+        if (!userRecord) {
+            return res.status(404).json({ error: 'User not found or no logbo data yet' });
+        }
+
+        const targetUserId = userRecord.user_id;
+
+        // 2. 履歴を検索
+        let sql = 'SELECT logbo_date FROM logbo_history WHERE user_id = ?';
+        const params = [targetUserId];
+
+        if (year && month) {
+            const likeStr = `${year}-${String(month).padStart(2, '0')}%`;
+            sql += ' AND logbo_date LIKE ?';
+            params.push(likeStr);
+        }
+
+        const rows = db.prepare(sql).all(...params);
+        
+        // 配列で返す ["2026-02-01", "2026-02-05"]
+        res.json(rows.map(r => r.logbo_date));
+
+    } catch (e) {
+        console.error('API Error:', e);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// サーバー起動
+app.listen(API_PORT, () => {
+    console.log(`>>> API Server running on port ${API_PORT}`);
+});
+
+// ---------------------------------------------------------
+// Botロジック
+// ---------------------------------------------------------
+
 const processedNotes = new Set();
 
 function checkAndLock(noteId) {
   if (processedNotes.has(noteId)) {
-    return true; // ロック済み（スキップ）
+    return true; 
   }
   processedNotes.add(noteId);
   setTimeout(() => {
@@ -75,7 +150,6 @@ function checkAndLock(noteId) {
   }, 30000);
   return false; // 新規（処理実行）
 }
-//
 
 function getLogboDate() {
   const now = new Date();
@@ -106,6 +180,14 @@ async function followUser(userId) {
 
 function recordLogbo(userId, fullAcct) {
   const today = getLogboDate();
+  
+  // 履歴テーブルにも書き込む
+  try {
+      db.prepare('INSERT OR IGNORE INTO logbo_history (user_id, logbo_date) VALUES (?, ?)').run(userId, today);
+  } catch (e) {
+      console.error('History insert error:', e);
+  }
+
   const record = db.prepare('SELECT * FROM logbo_records WHERE user_id = ?').get(userId);
 
   if (!record) {
@@ -166,21 +248,14 @@ async function processNote(note, channelName) {
   console.log(`[${channelName}] Processing note from @${acct}: ${text}`);
 
   if (note.user && note.user.isBot) {
-      console.log(`[${channelName}] Skipped processing note: isBot`);
       return;
   }
 
   if (note.mentions && note.mentions.length === 1 && note.mentions.some(e => e === botUser.id)) {
-  // is mention and only only mentions bot
-
     // Follow Me
     if (text.includes('follow me') || text.includes('フォローして')) {
       const isAlreadyFollowing = await isFollower(userId);
-      if (isAlreadyFollowing) {
-        console.log(`[${channelName}] Already following @${acct}. Skipping follow action.`);
-        return; // 既にフォロー済みなら何もしないで終了
-      }
-      // 
+      if (isAlreadyFollowing) return;
 
       console.log(`[${channelName}] Follow me detected`);
       await followUser(userId);
@@ -191,7 +266,6 @@ async function processNote(note, channelName) {
       });
       return;
     }
-
 
     // ランキング正規表現
     const rankingPattern = /ランキング|らんきんぐ|ranking/i;
@@ -222,29 +296,16 @@ function checkLogboStatus(userId) {
   const today = getLogboDate();
   const record = db.prepare('SELECT * FROM logbo_records WHERE user_id = ?').get(userId);
 
-  if (!record) {
-    return { alreadyDone: false, total: 0, consecutive: 0 };
-  }
-
+  if (!record) return { alreadyDone: false, total: 0, consecutive: 0 };
   if (record.last_logbo_date === today) {
-    return { 
-      alreadyDone: true, 
-      total: record.total_days, 
-      consecutive: record.consecutive_days 
-    };
+    return { alreadyDone: true, total: record.total_days, consecutive: record.consecutive_days };
   }
-
-  return { 
-    alreadyDone: false, 
-    total: record.total_days, 
-    consecutive: record.consecutive_days 
-  };
+  return { alreadyDone: false, total: record.total_days, consecutive: record.consecutive_days };
 }
 
 // メイン処理
 async function processLogboWithAcct(note, userId, acct) {
   try {
-    // DMおぷしょん
     const dmOptions = {
       visibility: 'specified',
       visibleUserIds: [userId], // 宛先つけないとだめらしい
@@ -265,13 +326,8 @@ async function processLogboWithAcct(note, userId, acct) {
 
     if (status.alreadyDone) {
       try {
-        await cli.request('notes/reactions/create', { 
-          noteId: note.id, 
-          reaction: ':ablobcatblinkhyper:' 
-        });
-      } catch (e) {
-        // 無視
-      }
+        await cli.request('notes/reactions/create', { noteId: note.id, reaction: ':ablobcatblinkhyper:' });
+      } catch (e) {}
 
       await cli.request('notes/create', {
         text: `@${acct} 本日は既にログインボーナスを**受取済み**です...\n$[sparkle **連続: ${status.consecutive}日**] / **合計: ${status.total}日**`,
@@ -302,33 +358,27 @@ async function processLogboWithAcct(note, userId, acct) {
     else if (new Date(note.createdAt).getSeconds() === 0) {
       const code = `00000${Math.floor(Math.random() * 1000000)}`.slice(-6);
       pendingAuth.set(userId, code);
-
       await cli.request('notes/create', {
         text: `@${acct} 【自動化対策】\n$[fg.color=ff0000 ログボを受け取るには認証が必要です。]\n返信で「${code}」と送ってください。`,
         replyId: note.id,
         visibility: 'home'
       });
-      console.log(`>>> Auth challenge sent to ${acct} (Code: ${code})`);
-      return; // 書き込まずに終了
+      return;
     }
-    // 自動化クリア
 
-    // ここで記録
+    // 記録実行
     const result = recordLogbo(userId, acct);
     
     try {
       const reactionEmoji = result.alreadyDone ? ':ablobcatblinkhyper:' : ':blobcat_fun_c30:';
       await cli.request('notes/reactions/create', { noteId: note.id, reaction: reactionEmoji });
-    } catch (e) {
-      // リアクション重複エラーは無視
-    }
+    } catch (e) {}
 
     const replyVisibility = note.visibility === 'specified' ? 'specified' : 'home';
     let message = '';
     
     // ここは recordLogbo の戻り値を使う（さっき書き込んだ最新の結果）
     if (result.alreadyDone) {
-      // ※ ここに来ることは理論上少ないが、タイミング次第でありえるので残す
       message = `@${acct} 本日は既にログインボーナスを受取済みです...\n$[sparkle **連続: ${result.consecutive}日**] / **合計: ${result.total}日**`;
     } else {
       message = result.consecutive === 1 && result.total === 1
@@ -342,7 +392,6 @@ async function processLogboWithAcct(note, userId, acct) {
     console.error(`Error processing logbo for ${acct}:`, err);
   }
 }
-// 
 
 function getFullAcct(user) {
   const host = user.host || BOT_HOST;
@@ -357,10 +406,7 @@ const mainChannel = stream.useChannel('main');
 
 mainChannel.on('mention', async (note) => {
   try {
-    if (checkAndLock(note.id)) {
-        console.log(`[SKIP-MAIN] Duplicate detected: ${note.id}`);
-        return;
-    }
+    if (checkAndLock(note.id)) return;
     await processNote(note, 'MAIN');
   } catch (err) {
     console.error('[MAIN] Error:', err);
@@ -371,11 +417,7 @@ const hybridChannel = stream.useChannel('hybridTimeline');  // SocialTLも見る
 
 hybridChannel.on('note', async (note) => {
   try {
-    if (checkAndLock(note.id)) {
-      console.log(`[SKIP-HYBRID] Duplicate detected: ${note.id}`);
-      return;
-    }
-
+    if (checkAndLock(note.id)) return;
     await processNote(note, 'HYBRID');
   } catch (err) {
     console.error('[HYBRID] Error:', err);
@@ -391,24 +433,16 @@ cron.schedule('0 22 * * *', async () => {
     const rankingText = getRanking();
     
     // データがない場合はスキップするか、ログだけ出して終了
-    if (rankingText === '現在、データはありません。') {
-      console.log('Ranking is empty, skipping scheduled tweet.');
-      return;
-    }
+    if (rankingText === '現在、データはありません。') return;
 
-    // 投稿内容（内容はgetRankingのまま）
     const noteText = `${rankingText}\n\n#すてーしょんログボbotランキング`;
-
     await cli.request('notes/create', {
       text: noteText,
       visibility: 'public' // 公開範囲
     });
-
-    console.log('>>> Scheduled ranking tweet sent.');
   } catch (err) {
     console.error('Failed to send scheduled ranking:', err);
   }
 });
 
-console.log('Logbo bot started with Fixed Functions.');
-console.log(`Bot Hostname: ${BOT_HOST}`);
+console.log('Logbo bot started with API Server.');

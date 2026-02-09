@@ -1,7 +1,7 @@
 {
   "name": "logbo-bot",
-  "version": "1.2.0",
-  "description": "Misskey login bonus bot",
+  "version": "1.3.0",
+  "description": "Misskey login bonus bot with API",
   "type": "module",
   "main": "bot.js",
   "scripts": {
@@ -16,6 +16,9 @@
   "license": "CC0-1.0",
   "dependencies": {
     "better-sqlite3": "^11.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.4",
+    "express": "^4.21.0",
     "misskey-js": "^2024.10.1",
     "node-cron": "^4.2.1",
     "ws": "^8.18.0"
