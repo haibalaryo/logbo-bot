@@ -91,7 +91,7 @@ app.use(cors({
 }));
 
 // API: 特定ユーザーのカレンダーデータを取得
-app.get('/api/calendar/:username', (req, res) => {
+app.get('/calendar/:username', (req, res) => {
     try {
         const { username } = req.params;
         const { year, month } = req.query;
